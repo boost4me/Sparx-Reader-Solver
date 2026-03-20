@@ -1,5 +1,5 @@
 # Sparx-Reader-Solver
-This is an extension created to help students who are struggling with their sparx reader homework and those who are just feeling lazy. Please follow the installation procedures as detailed below and contact support on our [discord server](https://discord.gg/5hjGqbbxGw) if you require assistance. This extension uses the Google AI of Gemini-2.0-flash (<b>Free</b>) to automatically provide you the answer to questions.
+This is an extension created to help students who are struggling with their sparx reader homework and those who are just feeling lazy. Please follow the installation procedures as detailed below and contact support on our [discord server](https://discord.gg/9KNhUqbnAR) if you require assistance. This extension uses the Google AI of Gemini-2.0-flash (<b>Free</b>) to automatically provide you the answer to questions.
 
 # Disclosure
 - We are not associated with Sparx

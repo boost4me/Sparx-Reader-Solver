@@ -1,10 +1,10 @@
-console.log("Sparx Reader Solver content script loaded");
+console.log("Sparx Reader Solver content script loaded - using Gemini 3.6 Flash");
 
 let lastExtract = "";
 let lastQuestion = "";
 let startingValue = "Q0.";
 let isProcessing = false;
-const DEBOUNCE_DELAY = 500;
+const DEBOUNCE_DELAY = 800;
 let debounceTimer = null;
 
 function requestGeneration(prompt, extract) {
@@ -14,9 +14,15 @@ function requestGeneration(prompt, extract) {
       return;
     }
 
+    const timeout = setTimeout(() => {
+      reject(new Error("Request timed out after 30 seconds"));
+    }, 30000);
+
     chrome.runtime.sendMessage(
       { action: "generate", prompt: prompt, extract: extract },
       (response) => {
+        clearTimeout(timeout);
+        
         if (chrome.runtime.lastError) {
           reject(new Error(chrome.runtime.lastError.message));
           return;
@@ -66,7 +72,10 @@ const observer = new MutationObserver((mutations) => {
 
 async function processQuestions() {
     try {
-        if (isProcessing) return;
+        if (isProcessing) {
+            console.log("Already processing a question, skipping...");
+            return;
+        }
 
         const extractRead = document.querySelector('[class^="read-content"]');
         const questionRead = document.querySelector('[class="PanelPaperbackQuestionContainer"]');
@@ -75,13 +84,16 @@ async function processQuestions() {
             const copiedText = copyTextParagraph('Start reading here', 'Stop reading here');
             if (copiedText && lastExtract !== copiedText) {
                 lastExtract = copiedText;
-                console.log("Extract updated");
+                console.log("Reading extract updated");
             }
         } 
         
         if (questionRead) {
             let copiedText = copyTextParagraph('Q');
-            if (!copiedText) return;
+            if (!copiedText) {
+                console.log("No question text found");
+                return;
+            }
 
             // Match all question starts
             const matches = [...copiedText.matchAll(/Q\d+\./g)];
@@ -101,20 +113,30 @@ async function processQuestions() {
 
                 if (!lastExtract) {
                   console.log("No extract available yet");
+                  alert("⚠️ Please read the passage first before answering questions.");
                   return;
                 }
 
                 isProcessing = true;
                 try {
+                    console.log("Generating answer for question...");
                     const result = await requestGeneration(copiedText, lastExtract);
                     console.log("Generated answer:", result);
                     
                     // Show result with better formatting
-                    const formattedResult = `Answer: ${result}`;
+                    const formattedResult = `📚 Answer: ${result}`;
                     alert(formattedResult);
                 } catch (error) {
                     console.error("Generation error:", error);
-                    alert("Error: " + error.message);
+                    let errorMsg = error.message;
+                    
+                    if (errorMsg.includes('429')) {
+                        errorMsg = "⏱️ Rate limited! You've used your free API quota. Please wait a moment and try again.";
+                    } else if (errorMsg.includes('401') || errorMsg.includes('403')) {
+                        errorMsg = "🔑 API Key issue! Please check your Gemini API key in the extension settings.";
+                    }
+                    
+                    alert("❌ " + errorMsg);
                 } finally {
                     isProcessing = false;
                 }
@@ -127,4 +149,4 @@ async function processQuestions() {
 
 observer.observe(document.body, { childList: true, subtree: true });
 
-console.log("Sparx Reader Solver initialized successfully");
+console.log("✓ Sparx Reader Solver initialized successfully with Gemini 3.6 Flash");

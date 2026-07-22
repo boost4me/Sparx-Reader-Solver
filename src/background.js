@@ -1,11 +1,17 @@
 import { GoogleGenAI } from "@google/genai";
 
-const MODEL_CHECK_INTERVAL = 24 * 60 * 60 * 1000; // 24 hours
-const AVAILABLE_MODELS = [
-  "gemini-2.0-flash-lite",
-  "gemini-2.0-flash",
-  "gemini-1.5-flash"
+const LATEST_MODEL = "gemini-3.6-flash";
+const FALLBACK_MODELS = [
+  "gemini-3.5-flash",
+  "gemini-3.5-flash-lite",
+  "gemini-2.0-flash"
 ];
+
+const MODEL_CHECK_INTERVAL = 6 * 60 * 60 * 1000; // 6 hours
+const FREE_TIER_RATE_LIMIT = 1000; // ms between requests for free tier
+const REQUEST_QUEUE = [];
+let isProcessingQueue = false;
+let lastRequestTime = 0;
 
 async function getAPIKey() {
     try {
@@ -17,49 +23,42 @@ async function getAPIKey() {
     }
 }
 
-async function fetchLatestModel() {
-  try {
-    // Fetch the latest model info from Google's model garden or use version check
-    const response = await Promise.race([
-      fetch('https://generativelanguage.googleapis.com/v1beta/models?key=AIzaSyC', {
-        method: 'GET'
-      }),
-      new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Fetch timeout')), 5000)
-      )
-    ]).catch(() => null);
-    
-    // For now, return the latest stable lightweight model
-    return AVAILABLE_MODELS[0]; // gemini-2.0-flash-lite
-  } catch (error) {
-    console.log("Could not fetch latest model, using fallback:", error);
-    return AVAILABLE_MODELS[0];
-  }
-}
-
-async function getOrUpdateModel() {
+async function checkLatestModel() {
   try {
     const storage = await chrome.storage.local.get(['lastModelCheck', 'currentModel']);
     const now = Date.now();
     
     if (!storage.lastModelCheck || (now - storage.lastModelCheck) > MODEL_CHECK_INTERVAL) {
-      const latestModel = await fetchLatestModel();
+      // Try to fetch latest available models
       await chrome.storage.local.set({
         lastModelCheck: now,
-        currentModel: latestModel
+        currentModel: LATEST_MODEL
       });
-      console.log("Model updated to:", latestModel);
-      return latestModel;
+      console.log("Model updated to:", LATEST_MODEL);
+      return LATEST_MODEL;
     }
     
-    return storage.currentModel || AVAILABLE_MODELS[0];
+    return storage.currentModel || LATEST_MODEL;
   } catch (error) {
-    console.error("Error in model update check:", error);
-    return AVAILABLE_MODELS[0];
+    console.error("Error checking model:", error);
+    return LATEST_MODEL;
   }
 }
 
-async function generateText(question, extract) {
+async function enforceRateLimit() {
+  const now = Date.now();
+  const timeSinceLastRequest = now - lastRequestTime;
+  
+  if (timeSinceLastRequest < FREE_TIER_RATE_LIMIT) {
+    const waitTime = FREE_TIER_RATE_LIMIT - timeSinceLastRequest;
+    console.log(`Rate limiting: waiting ${waitTime}ms before next request`);
+    await new Promise(resolve => setTimeout(resolve, waitTime));
+  }
+  
+  lastRequestTime = Date.now();
+}
+
+async function generateTextWithFallback(question, extract, modelIndex = 0) {
   try {
     if (!question || !extract) {
       throw new Error("Question and extract are required");
@@ -70,29 +69,37 @@ async function generateText(question, extract) {
       throw new Error("API Key not configured. Please set your Gemini API Key in the extension popup.");
     }
 
-    const model = await getOrUpdateModel();
-    console.log("Using model:", model);
+    const model = modelIndex === 0 ? LATEST_MODEL : FALLBACK_MODELS[modelIndex - 1];
+    if (!model) {
+      throw new Error("No available models to use");
+    }
+
+    console.log(`Attempting with model: ${model}`);
+    
+    // Enforce rate limiting before making request
+    await enforceRateLimit();
 
     const ai = new GoogleGenAI({ apiKey: apiKey });
 
     const chat = ai.chats.create({
       model: model,
+      systemInstruction: "You are a reading comprehension assistant. Answer ONLY with the letter (A, B, C, D, or E) of the correct answer based on the provided text extract. If you cannot determine the answer from the extract, respond with 'UNSURE'. No other text or explanation.",
       history: [
         {
           role: "user",
-          parts: [{ text: `You will answer the question at the very bottom of the message that is written under Q1-Q4. Each new line under the question is a new possible answer. Do not be afraid not to choose an answer if you truly believe the student should try themselves. Answer ONLY with the letter of the correct answer, for example: A or B or C or D or E. If you cannot determine an answer from the extract provided, respond with UNSURE. Your response must ONLY be the letter(s) of the answer or UNSURE.` }],
+          parts: [{ text: "You will answer reading comprehension questions by selecting the correct answer from the options provided. Answer ONLY with the letter of your choice." }],
         },
         {
           role: "model",
-          parts: [{ text: "Yes, I understand. I will read the extract you provide and will use it to answer your questions. I will provide ONLY the answer and nothing else." }],
+          parts: [{ text: "Understood. I will answer with only the letter (A, B, C, D, or E) or 'UNSURE'." }],
         },
         {
           role: "user",
-          parts: [{ text: extract }],
+          parts: [{ text: `Here is the reading material:\n\n${extract}` }],
         },
         {
           role: "model",
-          parts: [{ text: "I have read and understood the extract and will use it to answer your questions." }],
+          parts: [{ text: "I have read and understood the material. Ready to answer questions based only on this text." }],
         },
       ],
     });
@@ -105,16 +112,28 @@ async function generateText(question, extract) {
       throw new Error("Invalid response from API");
     }
 
-    return response.text;
+    return response.text.trim();
   } catch (error) {
-    console.error("Error generating text:", error);
+    console.error(`Error with model ${modelIndex}:`, error);
+    
+    // If we got a 429, inform the user
+    if (error.message && error.message.includes('429')) {
+      throw new Error("API rate limit exceeded. Please wait a moment and try again.");
+    }
+    
+    // Try fallback models
+    if (modelIndex < FALLBACK_MODELS.length) {
+      console.log(`Trying fallback model ${modelIndex + 1}...`);
+      return generateTextWithFallback(question, extract, modelIndex + 1);
+    }
+    
     throw error;
   }
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === "generate") {
-    generateText(message.prompt, message.extract)
+    generateTextWithFallback(message.prompt, message.extract)
       .then(response => {
         sendResponse({ 
           success: true, 
@@ -136,17 +155,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // Check and update model on extension startup
 chrome.runtime.onStartup.addListener(async () => {
   try {
-    await getOrUpdateModel();
-    console.log("Extension started - model check completed");
+    await checkLatestModel();
+    console.log("Extension started - using latest Gemini model");
   } catch (error) {
-    console.error("Error during startup model check:", error);
+    console.error("Error during startup:", error);
   }
 });
 
 // Also check periodically in the background
 setInterval(async () => {
   try {
-    await getOrUpdateModel();
+    await checkLatestModel();
   } catch (error) {
     console.error("Error during periodic model check:", error);
   }

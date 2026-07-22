@@ -4,6 +4,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const apiKeyInput = document.getElementById('apiKeyInput');
   const saveKeyBtn = document.getElementById('saveKeyBtn');
   const testKeyBtn = document.getElementById('testKeyBtn');
+  const statusDiv = document.getElementById('status');
 
   // Load saved API key on popup open
   chrome.storage.local.get(['geminiApiKey'], (result) => {
@@ -17,17 +18,17 @@ document.addEventListener('DOMContentLoaded', () => {
     const apiKey = apiKeyInput.value.trim();
 
     if (!apiKey) {
-      alert('Please enter an API key!');
+      showStatus('Please enter an API key!', 'error');
       return;
     }
 
     try {
       chrome.storage.local.set({ geminiApiKey: apiKey }, () => {
-        alert('API Key saved successfully!');
+        showStatus('✓ API Key saved successfully!', 'success');
         console.log('API Key saved');
       });
     } catch (error) {
-      alert('Error saving API Key: ' + error.message);
+      showStatus('✗ Error saving API Key: ' + error.message, 'error');
       console.error('Save error:', error);
     }
   });
@@ -39,45 +40,66 @@ document.addEventListener('DOMContentLoaded', () => {
       const apiKey = apiKeyObject["geminiApiKey"] || '';
 
       if (!apiKey) {
-        alert('No API key found! Please save an API key first.');
+        showStatus('✗ No API key found! Please save an API key first.', 'error');
         return;
       }
 
       testKeyBtn.disabled = true;
       testKeyBtn.textContent = 'Testing...';
+      showStatus('Testing API key with Gemini 3.6 Flash...', 'info');
 
       const ai = new GoogleGenAI({ apiKey: apiKey });
 
       const response = await Promise.race([
         ai.models.generateContent({
-          model: "gemini-2.0-flash-lite",
+          model: "gemini-3.6-flash",
           contents: "Say only: API Key works",
         }),
         new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Request timeout')), 10000)
+          setTimeout(() => reject(new Error('Request timeout')), 15000)
         )
       ]);
 
       if (response && response.text) {
-        alert('✓ API Key is valid! Response: ' + response.text);
+        showStatus('✓ API Key is valid! Gemini 3.6 Flash is responding.', 'success');
       } else {
-        alert('Error: Unexpected response from API');
+        showStatus('✗ Unexpected response from API', 'error');
       }
     } catch (error) {
       console.error('Test error:', error);
       
-      if (error.message.includes('timeout')) {
-        alert('Request timeout. Please check your connection and API key.');
-      } else if (error.message.includes('403') || error.message.includes('401')) {
-        alert('Invalid API key. Please check your Gemini API key is correct.');
-      } else if (error.message.includes('429')) {
-        alert('Rate limited. Please wait before testing again.');
-      } else {
-        alert('Error testing API Key: ' + error.message);
+      let errorMessage = 'Error testing API Key: ' + error.message;
+      
+      if (error.message && error.message.includes('timeout')) {
+        errorMessage = '✗ Request timeout. Check your connection and API key.';
+      } else if (error.message && error.message.includes('403')) {
+        errorMessage = '✗ Forbidden: Your API key may not have access to Gemini 3.6 Flash. Make sure you have Gemini API enabled.';
+      } else if (error.message && error.message.includes('401')) {
+        errorMessage = '✗ Invalid API key. Please check your Gemini API key.';
+      } else if (error.message && error.message.includes('429')) {
+        errorMessage = '✗ Rate limited. You\'ve exceeded your API quota. Please wait or upgrade your plan.';
+      } else if (error.message && error.message.includes('400')) {
+        errorMessage = '✗ Bad request. The API might not support Gemini 3.6 Flash yet. Try with free tier limits.';
       }
+      
+      showStatus(errorMessage, 'error');
     } finally {
       testKeyBtn.disabled = false;
       testKeyBtn.textContent = 'Test Key';
     }
   });
+
+  function showStatus(message, type) {
+    if (!statusDiv) return;
+    
+    statusDiv.textContent = message;
+    statusDiv.className = `status ${type}`;
+    statusDiv.style.display = 'block';
+    
+    if (type === 'success') {
+      setTimeout(() => {
+        statusDiv.style.display = 'none';
+      }, 3000);
+    }
+  }
 });

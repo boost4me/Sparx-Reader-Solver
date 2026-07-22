@@ -1,152 +1,121 @@
-console.log("Sparx Reader Solver content script loaded - using Gemini 3.6 Flash");
+console.log("✓ Content script loaded on Sparx Reader");
 
 let lastExtract = "";
 let lastQuestion = "";
-let startingValue = "Q0.";
 let isProcessing = false;
-const DEBOUNCE_DELAY = 800;
+const DEBOUNCE = 800;
 let debounceTimer = null;
 
-function requestGeneration(prompt, extract) {
+function sendToBackground(prompt, extract) {
   return new Promise((resolve, reject) => {
-    if (!prompt || !extract) {
-      reject(new Error("Prompt and extract are required"));
-      return;
-    }
-
     const timeout = setTimeout(() => {
-      reject(new Error("Request timed out after 30 seconds"));
+      reject(new Error("30s timeout"));
     }, 30000);
 
     chrome.runtime.sendMessage(
-      { action: "generate", prompt: prompt, extract: extract },
+      { action: "generate", prompt, extract },
       (response) => {
         clearTimeout(timeout);
-        
-        if (chrome.runtime.lastError) {
-          reject(new Error(chrome.runtime.lastError.message));
+        if (!response) {
+          reject(new Error("No response"));
           return;
         }
-
-        if (response && response.success) {
+        if (response.success) {
           resolve(response.result);
         } else {
-          reject(new Error(response?.error || "Failed to generate response"));
+          reject(new Error(response.error));
         }
       }
     );
   });
 }
 
-function copyTextParagraph(startAt, endAt) {
-    try {
-        const allText = document.body.innerText;
-        if (!allText) return "";
-
-        const startIndex = allText.indexOf(startAt);
-        if (startIndex === -1) return "";
-
-        if (endAt) {
-          const afterStartIndex = startIndex + startAt.length;
-          const endIndex = allText.indexOf(endAt, afterStartIndex);
-          
-          if (endIndex === -1) return "";
-          return allText.substring(afterStartIndex, endIndex).trim();
-        }
-        return allText.substring(startIndex).trim();
-    } catch (error) {
-        console.error("Error copying text:", error);
-        return "";
+function copyTextBetween(start, end) {
+  try {
+    const text = document.body.innerText || "";
+    const startIdx = text.indexOf(start);
+    if (startIdx === -1) return "";
+    
+    if (end) {
+      const endIdx = text.indexOf(end, startIdx + start.length);
+      if (endIdx === -1) return "";
+      return text.substring(startIdx + start.length, endIdx).trim();
     }
+    return text.substring(startIdx).trim();
+  } catch (e) {
+    console.error("Error extracting:", e);
+    return "";
+  }
 }
 
-const observer = new MutationObserver((mutations) => {
-    try {
-        // Debounce to avoid excessive processing
-        clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(processQuestions, DEBOUNCE_DELAY);
-    } catch (error) {
-        console.error("Error in mutation observer:", error);
-    }
+const observer = new MutationObserver(() => {
+  clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(checkForQuestions, DEBOUNCE);
 });
 
-async function processQuestions() {
-    try {
-        if (isProcessing) {
-            console.log("Already processing a question, skipping...");
-            return;
-        }
+async function checkForQuestions() {
+  try {
+    if (isProcessing) return;
 
-        const extractRead = document.querySelector('[class^="read-content"]');
-        const questionRead = document.querySelector('[class="PanelPaperbackQuestionContainer"]');
-
-        if (extractRead) {
-            const copiedText = copyTextParagraph('Start reading here', 'Stop reading here');
-            if (copiedText && lastExtract !== copiedText) {
-                lastExtract = copiedText;
-                console.log("Reading extract updated");
-            }
-        } 
-        
-        if (questionRead) {
-            let copiedText = copyTextParagraph('Q');
-            if (!copiedText) {
-                console.log("No question text found");
-                return;
-            }
-
-            // Match all question starts
-            const matches = [...copiedText.matchAll(/Q\d+\./g)];
-
-            let updatedText = copiedText;
-
-            if (matches.length > 1) {
-                // If more than one question, remove the first one
-                updatedText = copiedText.replace(/Q\d+\.[\ s\S]*?(?=Q\d+\.)/, '');
-            }
-
-            copiedText = updatedText.trim();
-            
-            if ((copiedText !== lastQuestion) && !(copiedText.startsWith(startingValue))) {
-                startingValue = copiedText.slice(0, 3);
-                lastQuestion = copiedText;
-
-                if (!lastExtract) {
-                  console.log("No extract available yet");
-                  alert("⚠️ Please read the passage first before answering questions.");
-                  return;
-                }
-
-                isProcessing = true;
-                try {
-                    console.log("Generating answer for question...");
-                    const result = await requestGeneration(copiedText, lastExtract);
-                    console.log("Generated answer:", result);
-                    
-                    // Show result with better formatting
-                    const formattedResult = `📚 Answer: ${result}`;
-                    alert(formattedResult);
-                } catch (error) {
-                    console.error("Generation error:", error);
-                    let errorMsg = error.message;
-                    
-                    if (errorMsg.includes('429')) {
-                        errorMsg = "⏱️ Rate limited! You've used your free API quota. Please wait a moment and try again.";
-                    } else if (errorMsg.includes('401') || errorMsg.includes('403')) {
-                        errorMsg = "🔑 API Key issue! Please check your Gemini API key in the extension settings.";
-                    }
-                    
-                    alert("❌ " + errorMsg);
-                } finally {
-                    isProcessing = false;
-                }
-            }
-        }
-    } catch (error) {
-        console.error("Error processing questions:", error);
+    // Get reading extract
+    const extractEl = document.querySelector('[class*="read-content"]');
+    if (extractEl) {
+      const text = copyTextBetween("Start reading here", "Stop reading here");
+      if (text && text !== lastExtract) {
+        lastExtract = text;
+        console.log("📖 Extract found:", text.substring(0, 50) + "...");
+      }
     }
+
+    // Get question
+    const questionEl = document.querySelector('[class*="Question"]');
+    if (questionEl) {
+      let text = copyTextBetween("Q", "A)");
+      if (!text) text = copyTextBetween("Q", "");
+      
+      if (!text) return;
+
+      // Remove multiple questions, keep only current
+      const matches = [...text.matchAll(/Q\d+\./g)];
+      if (matches.length > 1) {
+        text = text.replace(/Q\d+\.[^]*?(?=Q\d+\.)/, "");
+      }
+
+      text = text.trim();
+
+      if (text !== lastQuestion && text.match(/^Q\d+\./)) {
+        lastQuestion = text;
+
+        if (!lastExtract) {
+          alert("⚠️ Read the passage first");
+          return;
+        }
+
+        isProcessing = true;
+        try {
+          console.log("🤖 Generating answer...");
+          const answer = await sendToBackground(text, lastExtract);
+          console.log("✓ Answer:", answer);
+          alert(`📚 Answer: ${answer}`);
+        } catch (err) {
+          console.error("❌ Error:", err);
+          let msg = err.message;
+          
+          if (msg.includes("API key")) msg = "🔑 Check your API key in settings";
+          else if (msg.includes("429") || msg.includes("quota")) msg = "⏱️ Rate limited, wait a moment";
+          else if (msg.includes("timeout")) msg = "⏳ Request timeout";
+          
+          alert("❌ " + msg);
+        } finally {
+          isProcessing = false;
+        }
+      }
+    }
+  } catch (err) {
+    console.error("❌", err);
+  }
 }
 
 observer.observe(document.body, { childList: true, subtree: true });
 
-console.log("✓ Sparx Reader Solver initialized successfully with Gemini 3.6 Flash");
+console.log("✓ Sparx Reader Solver ready");
